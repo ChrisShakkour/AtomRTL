@@ -1,0 +1,246 @@
+<title>AtomRTL Graph</title>
+<style>
+  :root {
+    /* layout: centered column, diagram card on top, node reference table below */
+    --bg: #faf9f7;
+    --fg: #1c1a17;
+    --muted: #6b6558;
+    --border: #e4e0d8;
+    --card: #ffffff;
+    --accent: #b5572e;
+    --accent-soft: #f3e3da;
+    --font-display: 'Fraunces', Georgia, serif;
+    --font-body: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17140f;
+      --fg: #f1ede4;
+      --muted: #a89f8d;
+      --border: #332d24;
+      --card: #211d16;
+      --accent: #e3824f;
+      --accent-soft: #3a2518;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #17140f;
+    --fg: #f1ede4;
+    --muted: #a89f8d;
+    --border: #332d24;
+    --card: #211d16;
+    --accent: #e3824f;
+    --accent-soft: #3a2518;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-body);
+    margin: 0;
+    padding-inline: 16px;
+    padding-block: 40px;
+  }
+  .wrap {
+    max-width: 880px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+  }
+
+  header { display: flex; flex-direction: column; gap: 8px; }
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  h1 {
+    font-family: var(--font-display);
+    font-size: clamp(1.8rem, 4vw, 2.6rem);
+    margin: 0;
+    text-wrap: balance;
+  }
+  .subtitle {
+    color: var(--muted);
+    font-size: 1rem;
+    max-width: 65ch;
+    line-height: 1.5;
+  }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 28px;
+    overflow-x: auto;
+  }
+
+  pre.mermaid {
+    margin: 0;
+    display: flex;
+    justify-content: center;
+    min-width: 560px;
+  }
+
+  .legend {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 14px;
+  }
+  .node {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+  .node .name {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .node.llm .name { color: var(--accent); }
+  .node .kind {
+    font-size: 0.7rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .node .desc {
+    font-size: 0.85rem;
+    color: var(--muted);
+    line-height: 1.4;
+  }
+
+  .key {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    font-size: 0.8rem;
+    color: var(--muted);
+  }
+  .key span { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .dot.llm { background: var(--accent); }
+  .dot.py { background: var(--muted); }
+
+  footer {
+    font-size: 0.8rem;
+    color: var(--muted);
+    border-top: 1px solid var(--border);
+    padding-top: 16px;
+  }
+  footer code {
+    font-family: var(--font-mono);
+    background: var(--accent-soft);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+</style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,500&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">LangGraph · atomrtl/graph.py</div>
+    <h1>AtomRTL's generation graph</h1>
+    <p class="subtitle">
+      Pulled directly from <code>build_graph().get_graph().draw_mermaid()</code> —
+      the real compiled graph, not a diagram reconstructed from reading the source.
+      Five deterministic Python nodes do the bookkeeping; three LLM nodes each get a
+      small, fresh, tool-free prompt.
+    </p>
+  </header>
+
+  <div class="card">
+    <pre class="mermaid">
+graph TD;
+	__start__([start]):::startend
+	parse_spec(parse_spec):::py
+	plan(plan):::llm
+	generate(generate):::llm
+	write_code(write_code):::py
+	check(check):::py
+	route(route):::py
+	fix(fix):::llm
+	finalize(finalize):::py
+	__end__([end]):::startend
+	__start__ --> parse_spec;
+	parse_spec --> plan;
+	plan --> generate;
+	generate --> write_code;
+	fix --> write_code;
+	write_code --> check;
+	check --> route;
+	route -.->|pass / budget exhausted| finalize;
+	route -.->|errors| fix;
+	route -.->|stuck: same error N times| generate;
+	finalize --> __end__;
+
+	classDef startend fill:#00000000,stroke-width:0,color:#6b6558
+	classDef py fill:#f3e3da,stroke:#b5572e,stroke-width:1px,color:#1c1a17
+	classDef llm fill:#b5572e,stroke:#b5572e,color:#ffffff
+    </pre>
+  </div>
+
+  <div class="key">
+    <span><i class="dot llm"></i> LLM node — fresh prompt, no tools, one code block back</span>
+    <span><i class="dot py"></i> Python node — deterministic, no model call</span>
+  </div>
+
+  <div class="legend">
+    <div class="node">
+      <span class="name">parse_spec</span>
+      <span class="kind">python</span>
+      <span class="desc">Extracts the module name and port list straight from the spec text.</span>
+    </div>
+    <div class="node llm">
+      <span class="name">plan</span>
+      <span class="kind">LLM</span>
+      <span class="desc">One short pass sketching the implementation approach before any code is written.</span>
+    </div>
+    <div class="node llm">
+      <span class="name">generate</span>
+      <span class="kind">LLM</span>
+      <span class="desc">Writes the first full SystemVerilog attempt as one fenced code block.</span>
+    </div>
+    <div class="node">
+      <span class="name">write_code</span>
+      <span class="kind">python</span>
+      <span class="desc">Extracts the code block and writes <code>TopModule.sv</code> to disk.</span>
+    </div>
+    <div class="node">
+      <span class="name">check</span>
+      <span class="kind">python</span>
+      <span class="desc">Compiles with iverilog, lints with slang, checks the interface against the spec.</span>
+    </div>
+    <div class="node">
+      <span class="name">route</span>
+      <span class="kind">python</span>
+      <span class="desc">Decides next step: clean → finalize, errors → fix, same error repeated → restart from generate.</span>
+    </div>
+    <div class="node llm">
+      <span class="name">fix</span>
+      <span class="kind">LLM</span>
+      <span class="desc">Gets the diagnostics and the failing code, returns a corrected version.</span>
+    </div>
+    <div class="node">
+      <span class="name">finalize</span>
+      <span class="kind">python</span>
+      <span class="desc">Writes <code>result.json</code> with the pass/fail status and full attempt history.</span>
+    </div>
+  </div>
+
+  <footer>
+    Node identities and descriptions are AtomRTL's own (<code>atomrtl/graph.py</code>);
+    the dotted edges out of <code>route</code> are its one conditional branch.
+  </footer>
+</div>
