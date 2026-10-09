@@ -37,6 +37,40 @@ Each problem directory contains the generated `TopModule.sv`, `result.json` (age
 output, every routing decision), and for benchmark runs `validation.json` / `validation.log`
 (scoring) and `status.json`. The run directory has `command.txt`, `config.yaml` and `summary.json`.
 
+## Results vs. TigressRTL
+
+Three complete runs against the full 156-problem verilog-eval spec-to-rtl set, all on the same
+model (`devstral-small-2` via Ollama) and the same dataset/scoring:
+
+| | AtomRTL | TigressRTL (no simulation) | TigressRTL (with simulation) |
+|---|---|---|---|
+| Run | `2026-10-05_23-15-16` | `2026-08-10_11-40-31` | `2026-09-26_17-30-29` |
+| Pass rate | 84/156 (53.8%) | 81/156 (51.9%) | 88/156 (56.4%) |
+| Build failures | 2 | 16 | 9 |
+| Functional failures | 66 | 57 | 56 |
+| Other (sim timeout, etc.) | 4 | 2 | 3 |
+| Total tokens | 497,605 | 3,467,554 | 29,084,828 |
+| Avg tokens/problem | ~3,190 | ~22,228 | ~186,441 |
+| Total compute time | ~5,148s (1.4h) | ~7,988s (2.2h) | ~29,192s (8.1h) |
+| Avg time/problem | 33.0s | 51.2s | 187.1s |
+
+TigressRTL is a single ReAct agent with tool access (`write_file`, `build_verilog`,
+`run_simulation`, ...) and one continuously-growing conversation for the whole problem — every
+retry resends the full history so far, not just the new turn. AtomRTL's `plan`/`generate`/`fix`
+nodes have no tools and each gets a small, fresh, independent prompt (see "How it works" above),
+with Python code (not the model) deciding what happens next. That architectural difference is
+most of why AtomRTL uses roughly 7x fewer tokens per problem than even TigressRTL's no-simulation
+baseline, and nearly 60x fewer than its with-simulation run — a handful of TigressRTL's hardest
+problems individually spent 400K-800K tokens on repeated fix-and-resimulate cycles that never
+converged.
+
+Simulation measurably helps TigressRTL's pass rate (51.9% to 56.4%) and roughly halves its build
+failures (16 to 9), at the cost of ~3.7x more wall-clock time and ~8.4x more tokens for the whole
+run. That with-simulation number predates two fixes made after this run (a VCD-based debug context
+that was leaking information from the hidden reference module, and a fallback for when the model
+diagnoses a fix correctly but fails to apply it) — a rerun with the current code would likely score
+higher, but a clean, complete 156-problem run with that code doesn't exist yet.
+
 ## Environment
 
 Uses conda (conda-forge) for Python and system tools, and pip for Python packages.
