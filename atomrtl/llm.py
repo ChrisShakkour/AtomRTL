@@ -1,4 +1,4 @@
-"""One shared Ollama server for all agents, and a factory for clients that connect to it."""
+"""One shared Ollama server for all agents, and a factory for chat-model clients (Ollama or Anthropic API)."""
 
 import os
 import shutil
@@ -9,9 +9,10 @@ import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 
+from langchain_core.language_models import BaseChatModel
 from langchain_ollama import ChatOllama
 
-from atomrtl.config import DEFAULT, NodeLLMConfig, OllamaConfig
+from atomrtl.config import DEFAULT, AgentConfig, AnthropicConfig, NodeLLMConfig, OllamaConfig
 
 
 def is_running(cfg: OllamaConfig = DEFAULT) -> bool:
@@ -99,13 +100,63 @@ def ollama_server(cfg: OllamaConfig = DEFAULT):
         keeper.close()
 
 
-def make_llm(cfg: OllamaConfig = DEFAULT, node: NodeLLMConfig | None = None, **kwargs) -> ChatOllama:
-    """Client for the shared server; always uses the shared num_ctx.
+class _NoServer:
+    """Stands in for ServerKeeper when the model is behind an API: nothing to start or keep alive."""
+
+    def ensure(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+@contextmanager
+def llm_backend(cfg: AgentConfig):
+    """What the agents need running for `cfg.provider`: the shared Ollama server, or nothing (Anthropic API).
+
+    Yields an object with ensure(), like ollama_server().
+    """
+    if cfg.provider == "anthropic":
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise RuntimeError("provider is anthropic but ANTHROPIC_API_KEY is not set")
+        yield _NoServer()
+    else:
+        with ollama_server(cfg.ollama) as keeper:
+            yield keeper
+
+
+def make_llm(cfg: AgentConfig, node: NodeLLMConfig | None = None, **kwargs) -> BaseChatModel:
+    """Chat model for the configured provider.
 
     `node` applies per-node overrides (model, temperature, max_tokens) — see AgentConfig.node_llm().
     """
+    if cfg.provider == "anthropic":
+        return _make_anthropic(cfg.anthropic, node, **kwargs)
+    return _make_ollama(cfg.ollama, node, **kwargs)
+
+
+def _make_ollama(cfg: OllamaConfig = DEFAULT, node: NodeLLMConfig | None = None, **kwargs) -> ChatOllama:
+    """Client for the shared server; always uses the shared num_ctx."""
     if node is not None:
         kwargs.setdefault("temperature", node.temperature)
         kwargs.setdefault("num_predict", node.max_tokens)
     model = node.model if node is not None and node.model else cfg.model
     return ChatOllama(model=model, base_url=cfg.url, num_ctx=cfg.num_ctx, **kwargs)
+
+
+def _make_anthropic(cfg: AnthropicConfig, node: NodeLLMConfig | None = None, **kwargs):
+    """Claude over the API. No temperature: Claude Sonnet 5.5 rejects non-default sampling and always thinks
+    (adaptive); `effort` controls how much."""
+    # Imported here so an Ollama-only environment doesn't need the package.
+    from langchain_anthropic import ChatAnthropic
+
+    model = node.model if node is not None and node.model else cfg.model
+    max_tokens = node.max_tokens if node is not None and node.max_tokens else cfg.max_tokens
+    if cfg.refusal_fallback:
+        kwargs.setdefault("betas", ["server-side-fallback-2026-07-01"])
+        kwargs.setdefault("model_kwargs", {"fallbacks": "default"})
+    # An organization-level key (not scoped to a workspace) must name the workspace on every request.
+    if workspace := os.environ.get("ANTHROPIC_WORKSPACE_ID"):
+        kwargs.setdefault("default_headers", {"anthropic-workspace-id": workspace})
+    return ChatAnthropic(model=model, max_tokens=max_tokens, reasoning_effort=cfg.effort,
+                         max_retries=cfg.max_retries, timeout=cfg.timeout, **kwargs)

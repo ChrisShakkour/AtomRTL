@@ -1,4 +1,5 @@
-"""EDA checks as plain Python (no LLM): iverilog compile, pyslang lint, interface check.
+"""EDA checks as plain Python (no LLM): iverilog compile, pyslang lint, interface check, and
+simulation against a verilog-eval style reference testbench.
 
 Each check returns structured Diagnostics. The full raw tool output is kept on the CmdResult /
 LintResult for the transcript; the LLM only ever sees format_diagnostics()'s capped summary.
@@ -91,6 +92,66 @@ def run_iverilog(files: list[Path], cwd: Path, timeout: float = 30) -> tuple[Cmd
         # Failed without a file:line message (e.g. "Unknown module type" summaries, missing top).
         diags.append(Diagnostic("iverilog", "elab", "error", res.output.strip() or f"exit code {res.returncode}"))
     return res, diags
+
+
+# --- simulation against a reference testbench ---------------------------------------------------
+
+MISMATCH_RE = re.compile(r"Mismatches:\s*(\d+)\s+in\s+(\d+)\s+samples")
+# verilog-eval testbenches print one line per output in a `final` block.
+_OUTPUT_HINT_RE = re.compile(
+    r"Hint: Output '(?P<name>[^']+)' has (?:(?P<n>\d+) mismatches\. First mismatch occurred at time (?P<t>\d+)|no mismatches)"
+)
+
+
+@dataclass
+class SimResult:
+    status: str  # pass | fail | compile_error | sim_timeout | unknown
+    mismatches: int | None = None
+    samples: int | None = None
+    outputs: dict[str, tuple[int, int | None]] = field(default_factory=dict)  # name → (mismatches, first time)
+    log: list[str] = field(default_factory=list)  # "$ cmd -> exit N" + output, per command
+    vcd: Path | None = None
+    duration_s: float = 0.0
+
+    def summary(self) -> dict:
+        """JSON-friendly fields (no log)."""
+        return {"status": self.status, "mismatches": self.mismatches, "samples": self.samples,
+                "outputs": {k: list(v) for k, v in self.outputs.items()}}
+
+
+def simulate(test: Path, ref: Path, sources: list[Path], cwd: Path, timeout: float = 60) -> SimResult:
+    """Compile the testbench + reference + design with Icarus and run it in `cwd` (the same flow as scoring).
+
+    The testbench dumps wave.vcd into `cwd`. Sources are passed as given (relative to `cwd` or absolute).
+    """
+    start = time.monotonic()
+    vvp = cwd / "sim.vvp"
+    comp = run_cmd(["iverilog", "-g2012", "-o", "sim.vvp", str(test), str(ref), *map(str, sources)], cwd, timeout)
+    result = SimResult("compile_error", log=[f"$ {comp.cmdline}  -> exit {comp.returncode}\n{comp.output}"])
+    if not comp.timed_out and comp.returncode == 0:
+        sim = run_cmd(["vvp", "-n", "sim.vvp"], cwd, timeout)
+        result.log.append(f"$ {sim.cmdline}  -> exit {sim.returncode}\n{sim.output}")
+        m = MISMATCH_RE.search(sim.output)
+        if sim.timed_out or "TIMEOUT" in sim.output:
+            result.status = "sim_timeout"
+        elif m:
+            result.mismatches, result.samples = int(m[1]), int(m[2])
+            result.status = "pass" if result.mismatches == 0 else "fail"
+        else:
+            result.status = "unknown"
+        result.outputs = {h["name"]: (int(h["n"]), int(h["t"])) if h["n"] else (0, None)
+                          for h in _OUTPUT_HINT_RE.finditer(sim.output)}
+        if (cwd / "wave.vcd").exists():
+            result.vcd = cwd / "wave.vcd"
+    vvp.unlink(missing_ok=True)
+    result.duration_s = time.monotonic() - start
+    return result
+
+
+def sim_signature(res: SimResult) -> str:
+    """Stable id of a simulation outcome (per-output mismatch count and first time), to detect a stuck sim loop."""
+    key = f"{res.status}:{res.mismatches}:" + ",".join(f"{k}={v[0]}@{v[1]}" for k, v in sorted(res.outputs.items()))
+    return hashlib.sha1(key.encode()).hexdigest()[:12]
 
 
 # --- pyslang ------------------------------------------------------------------------------------

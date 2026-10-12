@@ -156,3 +156,39 @@ def test_fix_hints_match_on_code_and_message():
     assert by_code and "case items" in by_code[0]
     assert by_msg and "own braces" in by_msg[0]
     assert warn_only == []  # hints are only for errors
+
+
+# --- simulation against a verilog-eval style testbench ----------------------------------------
+
+from pathlib import Path
+
+from atomrtl.eda import sim_signature, simulate
+
+FIXTURES = Path(__file__).parent / "fixtures"
+NOR = "module TopModule(input logic a, input logic b, output logic out);\n  assign out = ~(a | b);\nendmodule\n"
+NAND = NOR.replace("~(a | b)", "~(a & b)")
+
+
+def _simulate(tmp_path, code):
+    (tmp_path / "TopModule.sv").write_text(code)
+    return simulate(FIXTURES / "nor_test.sv", FIXTURES / "nor_ref.sv", [Path("TopModule.sv")], tmp_path)
+
+
+def test_simulate_pass(tmp_path):
+    res = _simulate(tmp_path, NOR)
+    assert res.status == "pass" and res.mismatches == 0 and res.samples == 20
+    assert res.outputs == {"out": (0, None)}
+    assert res.vcd == tmp_path / "wave.vcd" and not (tmp_path / "sim.vvp").exists()
+
+
+def test_simulate_mismatches(tmp_path):
+    res = _simulate(tmp_path, NAND)
+    assert res.status == "fail" and res.mismatches > 0
+    n, first = res.outputs["out"]
+    assert n == res.mismatches and first is not None
+    assert sim_signature(res) != sim_signature(_simulate(tmp_path, NOR))
+
+
+def test_simulate_compile_error(tmp_path):
+    res = _simulate(tmp_path, NOR.replace("input logic b", "input logic c").replace("a | b", "a | c"))
+    assert res.status == "compile_error" and res.mismatches is None and "exit" in res.log[0]

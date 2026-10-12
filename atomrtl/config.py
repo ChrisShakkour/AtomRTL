@@ -35,18 +35,71 @@ DEFAULT = OllamaConfig()
 
 
 @dataclass(frozen=True)
+class AnthropicConfig:
+    """Claude over the Anthropic API (provider: anthropic). The key comes from ANTHROPIC_API_KEY, never from here."""
+
+    model: str = "claude-sonnet-5-5"
+    # Covers thinking + the reply. Claude Sonnet 5.5 always thinks (adaptive), so keep this well above the
+    # ~1K tokens a reply needs.
+    max_tokens: int = 16000
+    # output_config.effort: low | medium | high | xhigh | max. Controls how much the model thinks.
+    effort: str = "medium"
+    # Concurrent problems in the benchmark runner (no GPU to share; bounded by the API rate limits).
+    num_parallel: int = 8
+    max_retries: int = 4
+    # Seconds per request.
+    timeout: float = 600
+    # On a safety-classifier refusal, let the API rerun the request on a fallback model it picks
+    # (fallbacks: "default", beta server-side-fallback-2026-07-01). Claude API only.
+    refusal_fallback: bool = True
+
+
+@dataclass(frozen=True)
 class NodeLLMConfig:
-    """Per-node LLM overrides; None means use the default (model from OllamaConfig)."""
+    """Per-node LLM overrides; None means use the default (the active provider's model)."""
 
     model: str | None = None
+    # Ignored by the anthropic provider (Claude Sonnet 5.5 rejects non-default sampling).
     temperature: float | None = None
-    # Max tokens to generate (Ollama num_predict); None = model default.
+    # Max tokens to generate (Ollama num_predict / Anthropic max_tokens); None = provider default.
     max_tokens: int | None = None
 
 
 @dataclass(frozen=True)
+class SimConfig:
+    """Optional simulation against a reference testbench once the design passes the static checks.
+
+    The testbench/reference files are per problem, so they come from the CLI (--sim-tb/--sim-ref), not from here.
+    """
+
+    enabled: bool = False
+    # sim_fix attempts (LLM debugs a failing simulation), on top of max_attempts for static fixes.
+    max_fixes: int = 4
+    # Show the reference's expected output values in the waveform table (off: only inputs + the DUT's outputs).
+    show_expected: bool = True
+    # Waveform window around the first mismatch, in clock cycles (one row per clock edge), and a row cap.
+    cycles_before: int = 6
+    cycles_after: int = 2
+    max_rows: int = 24
+    # Give up early when the same mismatches (per output: count and first time) repeat this many times in a row.
+    # One repeat only adds a "your fix changed nothing" note to the next sim_fix prompt.
+    stuck_after: int = 3
+    # Compile + simulate timeout, seconds.
+    timeout: float = 60
+    # Output cap for sim_fix replies (a diagnosis + the design is well under 1K tokens; at temperature 0 the
+    # model occasionally loops until num_ctx). nodes.sim_fix.max_tokens overrides it.
+    max_tokens: int | None = 2048
+
+
+PROVIDERS = ("ollama", "anthropic")
+
+
+@dataclass(frozen=True)
 class AgentConfig:
+    # Which LLM backend every node uses: a local Ollama server, or Claude over the Anthropic API.
+    provider: str = "ollama"
     ollama: OllamaConfig = DEFAULT
+    anthropic: AnthropicConfig = AnthropicConfig()
     # Default sampling for every LLM node, overridable per node in `nodes`.
     temperature: float = 0.0
     nodes: dict[str, NodeLLMConfig] = field(default_factory=dict)
@@ -67,15 +120,39 @@ class AgentConfig:
     max_diagnostics: int = 8
     # Per-command timeout for EDA tools, seconds.
     eda_timeout: float = 30
+    simulation: SimConfig = SimConfig()
     runs_dir: Path = REPO_ROOT / "runs"
+
+    def __post_init__(self):
+        if self.provider not in PROVIDERS:
+            raise ValueError(f"unknown provider {self.provider!r}; expected one of {PROVIDERS}")
+
+    @property
+    def model(self) -> str:
+        """The active provider's default model."""
+        return self.anthropic.model if self.provider == "anthropic" else self.ollama.model
+
+    @property
+    def num_parallel(self) -> int:
+        return self.anthropic.num_parallel if self.provider == "anthropic" else self.ollama.num_parallel
+
+    def with_model(self, model: str) -> "AgentConfig":
+        """Copy with the active provider's model replaced (the --model flag)."""
+        if self.provider == "anthropic":
+            return dataclasses.replace(self, anthropic=dataclasses.replace(self.anthropic, model=model))
+        return dataclasses.replace(self, ollama=dataclasses.replace(self.ollama, model=model))
 
     def node_llm(self, node: str) -> NodeLLMConfig:
         """Resolved LLM settings for a node: per-node overrides on top of the defaults."""
         o = self.nodes.get(node, NodeLLMConfig())
+        if self.provider == "anthropic":
+            # No sampling settings, and no sim_fix cap: simulation.max_tokens guards against Ollama looping, but
+            # here thinking counts against max_tokens, so 2048 would truncate replies.
+            return NodeLLMConfig(model=o.model or self.model, temperature=None, max_tokens=o.max_tokens)
         return NodeLLMConfig(
-            model=o.model or self.ollama.model,
+            model=o.model or self.model,
             temperature=self.temperature if o.temperature is None else o.temperature,
-            max_tokens=o.max_tokens,
+            max_tokens=o.max_tokens if o.max_tokens or node != "sim_fix" else self.simulation.max_tokens,
         )
 
 
@@ -83,11 +160,14 @@ def load_config(path: str | Path | None = None, **overrides) -> AgentConfig:
     """AgentConfig from an optional YAML file (same keys as the dataclasses), then keyword overrides.
 
     YAML example:
+        provider: ollama            # or: anthropic
         ollama: {model: devstral-small-2, num_ctx: 16384}
+        anthropic: {model: claude-sonnet-5-5, effort: medium}
         temperature: 0.0
         max_attempts: 6
         nodes:
           plan: {temperature: 0.3}
+        simulation: {enabled: true, max_fixes: 4}
     """
     data = yaml.safe_load(Path(path).read_text()) if path else {}
     data = (data or {}) | {k: v for k, v in overrides.items() if v is not None}
@@ -99,6 +179,10 @@ def load_config(path: str | Path | None = None, **overrides) -> AgentConfig:
 
     if "ollama" in data:
         data["ollama"] = OllamaConfig(**data["ollama"])
+    if "anthropic" in data:
+        data["anthropic"] = AnthropicConfig(**data["anthropic"])
+    if "simulation" in data:
+        data["simulation"] = SimConfig(**data["simulation"])
     if "nodes" in data:
         data["nodes"] = {name: NodeLLMConfig(**cfg) for name, cfg in data["nodes"].items()}
     if "blocking_warnings" in data:

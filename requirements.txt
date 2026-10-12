@@ -4,8 +4,11 @@
 langgraph==1.2.12
 langchain-core==1.6.6
 
-# LLM backend (Ollama)
+# LLM backends: Ollama (default) and Claude over the Anthropic API (provider: anthropic).
+# 1.7.6 needs langchain-core>=1.6.10.
 langchain-ollama==1.1.0
+langchain-anthropic==1.7.5
+anthropic==1.13.0
 
 # EDA: SystemVerilog lint + interface parsing (conda-forge "slang" is an unrelated library)
 pyslang==12.0.0

@@ -1,0 +1,3 @@
+# Claude over the Anthropic API (needs ANTHROPIC_API_KEY). See "Running on Claude" in the README.
+provider: anthropic
+anthropic: {model: claude-sonnet-5-5, effort: medium, max_tokens: 16000}
