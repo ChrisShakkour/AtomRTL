@@ -21,10 +21,18 @@ class Feedback(TypedDict):
 
 class AttemptRecord(TypedDict):
     attempt: int
-    node: str  # generate | fix
+    node: str  # generate | fix | sim_fix
     signature: str  # error signature ("" when clean)
     errors: int
     warnings: int
+
+
+class SimRecord(TypedDict):
+    sim_attempt: int  # sim_fix attempts made before this simulation
+    status: str  # pass | fail | compile_error | sim_timeout | unknown
+    mismatches: int | None
+    samples: int | None
+    signature: str  # per-output mismatch counts and first times
 
 
 def _add_tokens(a: dict, b: dict) -> dict:
@@ -42,7 +50,7 @@ class RTLState(TypedDict, total=False):
     # LLM nodes
     plan: str
     response: str  # last raw generate/fix response
-    response_node: str  # which node produced `response`: generate | fix
+    response_node: str  # which node produced `response`: generate | fix | sim_fix
     restart_hint: str | None  # set by route when a fresh generate replaces a stuck fix loop
     # write_code / check
     code: str | None
@@ -52,6 +60,15 @@ class RTLState(TypedDict, total=False):
     feedback: list[Feedback]  # for the current attempt; the fix node renders all of it
     attempts: int
     history: Annotated[list[AttemptRecord], operator.add]
+    # simulate / route_sim (only when simulation is enabled)
+    sim: dict  # last SimResult summary (status, mismatches, samples, outputs)
+    sim_feedback: str  # mismatch report + waveform table for the current code
+    sim_note: str | None  # set by route_sim when a sim fix made things worse and was discarded
+    sim_attempts: int
+    sim_history: Annotated[list[SimRecord], operator.add]
+    best_code: str | None  # the simulated code with the fewest mismatches so far
+    best_mismatches: int | None
+    best_feedback: str | None
     # route / finalize
     route: str
     route_reason: str
@@ -66,3 +83,6 @@ class RunContext:
     config: AgentConfig
     workdir: Path
     transcript: Transcript
+    # Reference testbench + reference model for the optional simulation step (never shown to the LLM).
+    testbench: Path | None = None
+    reference: Path | None = None

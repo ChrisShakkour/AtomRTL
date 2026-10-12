@@ -85,3 +85,22 @@ def build_fix_messages(state: RTLState) -> list[BaseMessage]:
             f"{_CODE_FORMAT}"
         ),
     ]
+
+
+def build_sim_fix_messages(state: RTLState) -> list[BaseMessage]:
+    note = f"## Note\n{state['sim_note']}\n\n" if state.get("sim_note") else ""
+    return [
+        SystemMessage(SYSTEM_PROMPT),
+        HumanMessage(
+            f"{_spec_section(state)}\n\n"
+            f"## Current code\n```systemverilog\n{(state.get('code') or '').rstrip()}\n```\n\n"
+            f"{note}"
+            "## Simulation against the testbench\n"
+            "The code compiles cleanly, but a testbench that compares its outputs against a correct "
+            f"implementation of the spec found mismatches.\n\n{state['sim_feedback']}\n\n"
+            "First explain in 2-4 short bullet points which behavior of the spec the failing outputs get "
+            "wrong and which part of the code causes it. Then fix the design while keeping the required "
+            "interface.\n"
+            f"{_CODE_FORMAT}"
+        ),
+    ]

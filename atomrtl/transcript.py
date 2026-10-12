@@ -113,6 +113,8 @@ class TranscriptCallback(BaseCallbackHandler):
         gen = response.generations[0][0]
         msg = getattr(gen, "message", None)
         usage = getattr(msg, "usage_metadata", None) or {}
+        # Anthropic: end_turn normally; refusal / max_tokens explain an empty or cut-off reply.
+        stop_reason = (getattr(msg, "response_metadata", None) or {}).get("stop_reason")
         sections = _format_messages(call["messages"])
         sections["RESPONSE"] = gen.text
         tool_calls = getattr(msg, "tool_calls", None)
@@ -125,6 +127,7 @@ class TranscriptCallback(BaseCallbackHandler):
             title=(
                 f"model={call['model']} temp={call['temperature']} "
                 f"in={usage.get('input_tokens', '?')} out={usage.get('output_tokens', '?')} tokens"
+                + (f" stop={stop_reason}" if stop_reason and stop_reason != "end_turn" else "")
             ),
             sections=sections,
             attempt=meta.get("attempt"),
@@ -132,6 +135,7 @@ class TranscriptCallback(BaseCallbackHandler):
             model=call["model"],
             temperature=call["temperature"],
             tokens=usage,
+            stop_reason=stop_reason,
         )
 
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **kw) -> None:
