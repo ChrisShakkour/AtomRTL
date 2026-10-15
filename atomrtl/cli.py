@@ -1,7 +1,7 @@
 """Run the RTL-creation agent on one spec.
 
     python -m atomrtl.cli --spec path/to/spec.txt [--top TopModule] [--config cfg.yaml]
-                          [--provider ollama|anthropic] [--model NAME]
+                          [--mode agent|oneshot] [--oneshot-prompt agent|verilog_eval] [--provider ollama|anthropic] [--model NAME]
                           [--sim-tb TB.sv --sim-ref REF.sv] [--workdir DIR] [--no-server] [-v]
 
 Creates runs/<timestamp>/<spec-name>/ with the generated .sv, result.json and the full transcript.
@@ -9,7 +9,8 @@ With --sim-tb/--sim-ref, a design that passes the static checks is also simulate
 testbench and reference, and an LLM fixes mismatches (see `simulation` in atomrtl/config.py).
 With the ollama provider, starts the Ollama server if it isn't running (and stops it afterwards), unless
 --no-server. The anthropic provider needs ANTHROPIC_API_KEY.
-Exit code: 0 = pass, 1 = finished without a passing design, 2 = crashed.
+--mode oneshot is the baseline: one LLM call with the spec, the reply written to the file unchecked.
+Exit code: 0 = pass (oneshot: code written), 1 = finished without a passing design, 2 = crashed.
 """
 
 import argparse
@@ -24,7 +25,7 @@ from pathlib import Path
 
 import yaml
 
-from atomrtl.config import PROVIDERS, AgentConfig, config_to_dict, load_config
+from atomrtl.config import MODES, ONESHOT_PROMPTS, PROVIDERS, AgentConfig, config_to_dict, load_config
 from atomrtl.graph import build_graph
 from atomrtl.llm import llm_backend
 from atomrtl.state import RunContext
@@ -54,7 +55,7 @@ def run_agent(spec: str, workdir: Path, cfg: AgentConfig, top: str | None = None
     transcript = Transcript(workdir, echo=verbose)
     start = time.monotonic()
     try:
-        return build_graph().invoke(
+        return build_graph(cfg.mode).invoke(
             {"spec": spec, "top": top},
             config={
                 "callbacks": [TranscriptCallback(transcript)],
@@ -78,6 +79,11 @@ def main() -> None:
     ap.add_argument("--spec", required=True, type=Path, help="spec text file")
     ap.add_argument("--top", help="required top module name (default: taken from the spec)")
     ap.add_argument("--config", type=Path, help="YAML config (see atomrtl/config.py)")
+    ap.add_argument("--mode", choices=MODES,
+                    help="agent (full graph) or oneshot (single LLM call, no checks) (default: from the config, else agent)")
+    ap.add_argument("--oneshot-prompt", choices=ONESHOT_PROMPTS,
+                    help="mode oneshot: agent (the agent's generate prompt, no plan) or verilog_eval "
+                         "(verilog-eval's own prompt) (default: from the config, else agent)")
     ap.add_argument("--provider", choices=PROVIDERS, help="LLM backend (default: from the config, else ollama)")
     ap.add_argument("--model", help="override the active provider's model")
     ap.add_argument("--sim-tb", type=Path, help="reference testbench to simulate the design against (enables simulation)")
@@ -90,11 +96,14 @@ def main() -> None:
     ap.add_argument("-v", "--verbose", action="store_true", help="print each transcript event live")
     args = ap.parse_args()
 
-    cfg = load_config(args.config, runs_dir=args.runs_dir, provider=args.provider)
+    cfg = load_config(args.config, runs_dir=args.runs_dir, provider=args.provider, mode=args.mode,
+                      oneshot_prompt=args.oneshot_prompt)
     if args.model:
         cfg = cfg.with_model(args.model)
     if bool(args.sim_tb) != bool(args.sim_ref):
         ap.error("--sim-tb and --sim-ref go together")
+    if args.sim_tb and cfg.mode == "oneshot":
+        ap.error("--mode oneshot never simulates; drop --sim-tb/--sim-ref")
     if args.sim_tb:
         cfg = replace(cfg, simulation=replace(cfg.simulation, enabled=True))
     elif cfg.simulation.enabled:
@@ -118,7 +127,7 @@ def main() -> None:
     print(f"\n{final['status'].upper()}: {final.get('route_reason')}")
     print(f"code:       {final.get('code_path')}")
     print(f"transcript: {workdir / 'transcript.log'}")
-    sys.exit(0 if final["status"] == "pass" else 1)
+    sys.exit(0 if final["status"] in ("pass", "unchecked") else 1)
 
 
 if __name__ == "__main__":

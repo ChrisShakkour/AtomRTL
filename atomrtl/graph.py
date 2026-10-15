@@ -8,6 +8,8 @@ parse_spec → plan → generate → write_code → check → route ─┬─ pa
      ┌──────────────────────────────────────────────────────────────────────────────────────────────────┘
      ├─ sim pass / out of sim budget / stuck → finalize (keeps the best simulated code)
      └─ mismatches → sim_fix → write_code (then check, and fix if the sim fix broke the build)
+
+mode oneshot (baseline, see config.MODES): parse_spec → oneshot → write_code → finalize_oneshot → END
 """
 
 import json
@@ -42,10 +44,21 @@ _FENCE_RE = re.compile(r"```[ \t]*([\w+-]*)[ \t]*\n(.*?)```", re.DOTALL)
 _MODULE_RE = re.compile(r"^\s*module\s+([A-Za-z_]\w*)", re.MULTILINE)
 
 
-def extract_code(response: str) -> str | None:
-    """The last fenced block that contains a full module (fix replies may quote old code first)."""
+_BARE_MODULE_RE = re.compile(r"^\s*module\b.*\bendmodule\b", re.MULTILINE | re.DOTALL)
+
+
+def extract_code(response: str, allow_bare: bool = False) -> str | None:
+    """The last fenced block that contains a full module (fix replies may quote old code first).
+
+    `allow_bare`: with no such block, fall back to the unfenced text from the first `module` to the last
+    `endmodule` (the oneshot prompt doesn't ask for a code block).
+    """
     blocks = [body for _, body in _FENCE_RE.findall(response) if "endmodule" in body]
-    return blocks[-1].strip() + "\n" if blocks else None
+    if blocks:
+        return blocks[-1].strip() + "\n"
+    if allow_bare and (m := _BARE_MODULE_RE.search(response)):
+        return m.group(0).strip() + "\n"
+    return None
 
 
 def _call_llm(node: str, messages: list[BaseMessage], state: RTLState, config: RunnableConfig, ctx: RunContext) -> AIMessage:
@@ -75,7 +88,7 @@ def parse_spec_node(state: RTLState, runtime: Runtime[RunContext]) -> dict:
 
 def write_code_node(state: RTLState, runtime: Runtime[RunContext]) -> dict:
     ctx = runtime.context
-    code = extract_code(state["response"])
+    code = extract_code(state["response"], allow_bare=ctx.config.mode == "oneshot")
     if code is None:
         ctx.transcript.event("state", "write_code", title="no code block in response", attempt=state["attempts"])
         return {"code": None, "code_path": None, "code_unchanged": False}
@@ -204,6 +217,26 @@ def finalize_node(state: RTLState, runtime: Runtime[RunContext]) -> dict:
     return {"status": status, **update}
 
 
+def finalize_oneshot_node(state: RTLState, runtime: Runtime[RunContext]) -> dict:
+    """Records the result without checking it: only the benchmark's scoring decides pass/fail."""
+    ctx = runtime.context
+    status = "unchecked" if state.get("code_path") else "no_code"
+    reason = "oneshot: written without checks" if status == "unchecked" else "oneshot: no code in the reply"
+    result = {
+        "status": status,
+        "reason": reason,
+        "module_name": state.get("module_name"),
+        "code_path": state.get("code_path"),
+        "attempts": state["attempts"],
+        "history": [],
+        "final_diagnostics": [],
+        "tokens": state.get("tokens", {}),
+    }
+    (ctx.workdir / "result.json").write_text(json.dumps(result, indent=2))
+    ctx.transcript.event("state", "finalize", title=f"status={status}", sections={"RESULT": json.dumps(result, indent=2)})
+    return {"status": status, "route_reason": reason}
+
+
 # --- simulation (optional) ----------------------------------------------------------------------
 
 
@@ -292,6 +325,16 @@ def route_sim_node(state: RTLState, runtime: Runtime[RunContext]) -> dict:
 # --- LLM nodes ----------------------------------------------------------------------------------
 
 
+def oneshot_node(state: RTLState, config: RunnableConfig, runtime: Runtime[RunContext]) -> dict:
+    state = {**state, "attempts": 1}
+    if runtime.context.config.oneshot_prompt == "verilog_eval":
+        messages = prompts.build_oneshot_messages(state)
+    else:
+        messages = prompts.build_generate_messages(state)  # no plan in state, so no plan section
+    msg = _call_llm("oneshot", messages, state, config, runtime.context)
+    return {"response": msg.text, "response_node": "oneshot", "attempts": 1, "tokens": _usage(msg)}
+
+
 def plan_node(state: RTLState, config: RunnableConfig, runtime: Runtime[RunContext]) -> dict:
     msg = _call_llm("plan", prompts.build_plan_messages(state), state, config, runtime.context)
     return {"plan": msg.text, "tokens": _usage(msg)}
@@ -320,7 +363,9 @@ def sim_fix_node(state: RTLState, config: RunnableConfig, runtime: Runtime[RunCo
 # --- graph --------------------------------------------------------------------------------------
 
 
-def build_graph():
+def build_graph(mode: str = "agent"):
+    if mode == "oneshot":
+        return _build_oneshot_graph()
     g = StateGraph(RTLState, context_schema=RunContext)
     g.add_node("parse_spec", parse_spec_node)
     g.add_node("plan", plan_node)
@@ -346,4 +391,19 @@ def build_graph():
     g.add_conditional_edges("route_sim", lambda s: s["route"], ["finalize", "sim_fix"])
     g.add_edge("sim_fix", "write_code")
     g.add_edge("finalize", END)
+    return g.compile()
+
+
+def _build_oneshot_graph():
+    # parse_spec only names the output file (TopModule.sv); its header never reaches the prompt.
+    g = StateGraph(RTLState, context_schema=RunContext)
+    g.add_node("parse_spec", parse_spec_node)
+    g.add_node("oneshot", oneshot_node)
+    g.add_node("write_code", write_code_node)
+    g.add_node("finalize_oneshot", finalize_oneshot_node)
+    g.add_edge(START, "parse_spec")
+    g.add_edge("parse_spec", "oneshot")
+    g.add_edge("oneshot", "write_code")
+    g.add_edge("write_code", "finalize_oneshot")
+    g.add_edge("finalize_oneshot", END)
     return g.compile()

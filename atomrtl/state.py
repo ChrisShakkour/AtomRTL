@@ -50,7 +50,7 @@ class RTLState(TypedDict, total=False):
     # LLM nodes
     plan: str
     response: str  # last raw generate/fix response
-    response_node: str  # which node produced `response`: generate | fix | sim_fix
+    response_node: str  # which node produced `response`: generate | fix | sim_fix | oneshot
     restart_hint: str | None  # set by route when a fresh generate replaces a stuck fix loop
     # write_code / check
     code: str | None
@@ -72,7 +72,7 @@ class RTLState(TypedDict, total=False):
     # route / finalize
     route: str
     route_reason: str
-    status: str  # pass | fail
+    status: str  # pass | fail (agent); unchecked | no_code (oneshot)
     tokens: Annotated[dict, _add_tokens]
 
 

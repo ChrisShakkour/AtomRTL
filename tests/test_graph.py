@@ -221,3 +221,65 @@ def test_sim_fix_output_cap():
     assert AgentConfig().node_llm("fix").max_tokens is None
     cfg = replace(AgentConfig(), nodes={"sim_fix": NodeLLMConfig(max_tokens=512)})
     assert cfg.node_llm("sim_fix").max_tokens == 512
+
+
+# --- mode oneshot (baseline) ---------------------------------------------------------------------
+
+
+def test_oneshot_single_call_no_checks(tmp_path, scripted_llm):
+    calls = scripted_llm(SYNTAX_ERR)  # broken code is written as-is: nothing checks it
+    final = _run(tmp_path, mode="oneshot")
+    assert final["status"] == "unchecked" and final["attempts"] == 1 and len(calls) == 1
+    assert "assign out = ~(a | b)\nendmodule" in (tmp_path / "TopModule.sv").read_text()
+    result = json.loads((tmp_path / "result.json").read_text())
+    assert result["status"] == "unchecked" and result["history"] == []
+    nodes = [e["node"] for e in _events(tmp_path)]
+    assert nodes.count("oneshot") == 1
+    assert not {"plan", "generate", "check", "fix", "simulate"} & set(nodes)
+
+
+def test_oneshot_prompt_is_verilog_eval_baseline():
+    from atomrtl import prompts
+    msgs = prompts.build_oneshot_messages({"spec": SPEC, "header": "module TopModule(...);"})
+    assert [m.type for m in msgs] == ["system", "human"]
+    assert msgs[0].content == prompts.ONESHOT_SYSTEM_PROMPT
+    assert msgs[1].content == SPEC  # verbatim: no parsed header, rules or format instructions
+
+
+def test_oneshot_unfenced_reply(tmp_path, scripted_llm):
+    scripted_llm("Here you go:\nmodule TopModule(input a, input b, output out);\n  assign out = ~(a | b);\nendmodule\nDone.")
+    final = _run(tmp_path, mode="oneshot")
+    assert final["status"] == "unchecked"
+    code = (tmp_path / "TopModule.sv").read_text()
+    assert code.startswith("module TopModule") and code.rstrip().endswith("endmodule")
+    # the agent's own extraction still requires a fenced block
+    assert graph.extract_code("module m; endmodule") is None
+
+
+def test_oneshot_no_code(tmp_path, scripted_llm):
+    scripted_llm("I can't do that.")
+    final = _run(tmp_path, mode="oneshot")
+    assert final["status"] == "no_code" and not (tmp_path / "TopModule.sv").exists()
+
+
+def test_oneshot_rejects_simulation():
+    from atomrtl.config import SimConfig
+    with pytest.raises(ValueError, match="never simulates"):
+        AgentConfig(mode="oneshot", simulation=SimConfig(enabled=True))
+    with pytest.raises(ValueError, match="unknown mode"):
+        AgentConfig(mode="vanilla")
+
+
+@pytest.mark.parametrize("variant", ["agent", "verilog_eval"])
+def test_oneshot_prompt_variants(tmp_path, scripted_llm, variant):
+    from atomrtl import prompts
+    scripted_llm(GOOD)
+    final = _run(tmp_path, mode="oneshot", oneshot_prompt=variant)
+    assert final["status"] == "unchecked"
+    log = (tmp_path / "transcript.log").read_text()
+    if variant == "agent":  # the agent's generate prompt: rules, parsed header, code-block instruction, no plan
+        assert prompts.SYSTEM_PROMPT.splitlines()[0] in log
+        assert "## Required interface" in log and "single ```systemverilog code block" in log
+        assert "## Plan" not in log
+    else:
+        assert prompts.ONESHOT_SYSTEM_PROMPT in log and "## Required interface" not in log

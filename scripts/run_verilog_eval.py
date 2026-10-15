@@ -1,8 +1,8 @@
 """Run the agent on verilog-eval spec-to-rtl problems and score each one against the hidden testbench.
 
     python scripts/run_verilog_eval.py [--problems 'Prob0[0-2]*' ...] [--limit N] [--jobs N] [--sim]
-                                       [--config cfg.yaml] [--provider ollama|anthropic] [--model NAME]
-                                       [--resume-dir runs/<ts>]
+                                       [--config cfg.yaml] [--mode agent|oneshot] [--oneshot-prompt agent|verilog_eval]
+                                       [--provider ollama|anthropic] [--model NAME] [--resume-dir runs/<ts>]
 
 Creates runs/<timestamp>/ (see README) with one directory per problem. Each problem runs as its own
 `python -m atomrtl.cli` subprocess (hard timeout, isolation) against one shared Ollama server, or against
@@ -11,6 +11,8 @@ By default the agent never sees the testbench or reference: scoring happens only
 With --sim (or `simulation.enabled` in the config) the agent itself simulates against the same testbench
 and reference and fixes mismatches (it sees only the mismatch report and a waveform table, never their
 source), so the pass rate is oracle-assisted and not comparable to a run without it.
+With --mode oneshot every problem is a single LLM call with no checks (the baseline); --oneshot-prompt picks
+the agent's generate prompt without a plan (default) or verilog-eval's own prompt.
 """
 
 import argparse
@@ -27,7 +29,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from atomrtl.cli import new_run_dir, write_run_info
-from atomrtl.config import PROVIDERS, REPO_ROOT, load_config
+from atomrtl.config import MODES, ONESHOT_PROMPTS, PROVIDERS, REPO_ROOT, load_config
 from atomrtl.eda import simulate
 from atomrtl.llm import ServerKeeper, llm_backend
 
@@ -141,6 +143,11 @@ def main() -> None:
     ap.add_argument("--problems", nargs="+", help="problem names or globs (default: all)")
     ap.add_argument("--limit", type=int, help="run at most N problems")
     ap.add_argument("--config", type=Path, help="YAML config (see atomrtl/config.py)")
+    ap.add_argument("--mode", choices=MODES,
+                    help="agent (full graph) or oneshot (single LLM call, no checks) (default: from the config, else agent)")
+    ap.add_argument("--oneshot-prompt", choices=ONESHOT_PROMPTS,
+                    help="mode oneshot: agent (the agent's generate prompt, no plan) or verilog_eval "
+                         "(verilog-eval's own prompt) (default: from the config, else agent)")
     ap.add_argument("--provider", choices=PROVIDERS, help="LLM backend (default: from the config, else ollama)")
     ap.add_argument("--model", help="override the active provider's model")
     ap.add_argument("--jobs", type=int, help="problems run in parallel (default: the provider's num_parallel)")
@@ -158,9 +165,12 @@ def main() -> None:
         run_dir = args.resume_dir
         cfg = load_config(run_dir / "config.yaml")
     else:
-        cfg = load_config(args.config, provider=args.provider)
+        cfg = load_config(args.config, provider=args.provider, mode=args.mode,
+                      oneshot_prompt=args.oneshot_prompt)
         if args.model:
             cfg = cfg.with_model(args.model)
+        if args.sim and cfg.mode == "oneshot":
+            ap.error("--mode oneshot never simulates; drop --sim")
         if args.sim:
             cfg = replace(cfg, simulation=replace(cfg.simulation, enabled=True))
         run_dir = new_run_dir(cfg.runs_dir)
@@ -171,7 +181,9 @@ def main() -> None:
     problems = find_problems(args.dataset_dir, args.problems, args.limit)
     todo = [p for p in problems if not is_done(run_dir / p)]
     jobs = args.jobs or cfg.num_parallel
-    print(f"run dir: {run_dir}\nprovider: {cfg.provider}  model: {cfg.model}  simulation: {'on' if sim else 'off'}  "
+    oneshot = f" ({cfg.oneshot_prompt} prompt)" if cfg.mode == "oneshot" else ""
+    print(f"run dir: {run_dir}\nmode: {cfg.mode}{oneshot}  provider: {cfg.provider}  model: {cfg.model}  "
+          f"simulation: {'on' if sim else 'off'}  "
           f"problems: {len(todo)} to run ({len(problems) - len(todo)} already done)  jobs: {jobs}\n", flush=True)
 
     with llm_backend(cfg) as keeper:

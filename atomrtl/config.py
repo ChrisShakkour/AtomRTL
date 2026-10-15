@@ -92,10 +92,19 @@ class SimConfig:
 
 
 PROVIDERS = ("ollama", "anthropic")
+# agent: the full graph (plan, generate, check, fix, optional simulation).
+# oneshot: baseline. The spec goes to the LLM once and the reply is written to the file unchecked:
+# no plan, no build, no lint, no fixes, no simulation.
+MODES = ("agent", "oneshot")
+# Prompt for mode oneshot. agent: the agent's own generate prompt (system rules, spec, parsed interface header,
+# code-block instruction), without a plan. verilog_eval: verilog-eval's spec-to-rtl prompt, the spec verbatim.
+ONESHOT_PROMPTS = ("agent", "verilog_eval")
 
 
 @dataclass(frozen=True)
 class AgentConfig:
+    mode: str = "agent"
+    oneshot_prompt: str = "agent"
     # Which LLM backend every node uses: a local Ollama server, or Claude over the Anthropic API.
     provider: str = "ollama"
     ollama: OllamaConfig = DEFAULT
@@ -126,6 +135,12 @@ class AgentConfig:
     def __post_init__(self):
         if self.provider not in PROVIDERS:
             raise ValueError(f"unknown provider {self.provider!r}; expected one of {PROVIDERS}")
+        if self.mode not in MODES:
+            raise ValueError(f"unknown mode {self.mode!r}; expected one of {MODES}")
+        if self.oneshot_prompt not in ONESHOT_PROMPTS:
+            raise ValueError(f"unknown oneshot_prompt {self.oneshot_prompt!r}; expected one of {ONESHOT_PROMPTS}")
+        if self.mode == "oneshot" and self.simulation.enabled:
+            raise ValueError("mode oneshot never simulates; turn simulation off")
 
     @property
     def model(self) -> str:
@@ -160,6 +175,8 @@ def load_config(path: str | Path | None = None, **overrides) -> AgentConfig:
     """AgentConfig from an optional YAML file (same keys as the dataclasses), then keyword overrides.
 
     YAML example:
+        mode: agent                 # or: oneshot (single LLM call, no checks; see MODES)
+        oneshot_prompt: agent       # or: verilog_eval (only used by mode oneshot)
         provider: ollama            # or: anthropic
         ollama: {model: devstral-small-2, num_ctx: 16384}
         anthropic: {model: claude-sonnet-5-5, effort: medium}

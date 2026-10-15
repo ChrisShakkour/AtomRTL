@@ -34,6 +34,19 @@ _CODE_FORMAT = (
 )
 
 
+# verilog-eval's own spec-to-rtl prompt (scripts/sv-generate: system_msg, empty prompt_prefix), so the oneshot
+# baseline is comparable with published verilog-eval results.
+ONESHOT_SYSTEM_PROMPT = "You are a Verilog RTL designer that only writes code using correct Verilog syntax."
+
+
+def build_oneshot_messages(state: RTLState) -> list[BaseMessage]:
+    """oneshot_prompt verilog_eval: the spec verbatim, with no parsed header, rules or format instructions.
+
+    (oneshot_prompt agent reuses build_generate_messages.)
+    """
+    return [SystemMessage(ONESHOT_SYSTEM_PROMPT), HumanMessage(state["spec"])]
+
+
 def _spec_section(state: RTLState) -> str:
     parts = [f"## Spec\n{state['spec'].strip()}"]
     if state.get("header"):
