@@ -75,6 +75,34 @@ Each problem directory contains the generated `TopModule.sv`, `result.json` (age
 output, every routing decision), and for benchmark runs `validation.json` / `validation.log`
 (scoring) and `status.json`. The run directory has `command.txt`, `config.yaml` and `summary.json`.
 
+## One-shot baseline (`--mode oneshot`)
+
+A run without the agent, to measure what the graph adds. Each problem gets one LLM call, and the reply is
+written to the file as-is:
+
+```
+parse_spec [py] → oneshot [LLM] → write_code [py] → finalize_oneshot [py]
+```
+
+- There is no plan, no iverilog/slang/interface check, no fix and no simulation. `--sim` is rejected.
+- `--oneshot-prompt` (or `oneshot_prompt:` in the config) picks the prompt:
+  - `agent` (default): the agent's own `generate` prompt with no plan section: the system rules, the
+    spec, the interface header parsed from it, and the single-code-block instruction. Against the full agent,
+    this measures what the plan and the check/fix/sim loop add.
+  - `verilog_eval`: verilog-eval's own spec-to-rtl prompt (`scripts/sv-generate`). The system message is
+    "You are a Verilog RTL designer that only writes code using correct Verilog syntax.", and the user
+    message is the spec verbatim. Results compare with published verilog-eval numbers, and against
+    `agent` this measures what AtomRTL's prompt adds.
+- The code is the last fenced block containing `endmodule`. With no fence, the text from the first `module`
+  to the last `endmodule` is used.
+- `result.json` says `unchecked` (code written) or `no_code`. Only the benchmark's scoring decides pass/fail,
+  so `agent_self_check_pass` in the summary is always 0.
+
+```bash
+python scripts/run_verilog_eval.py --mode oneshot --config configs/claude.yaml   # or --config configs/ollama.yaml
+python scripts/run_verilog_eval.py --mode oneshot --oneshot-prompt verilog_eval --config configs/claude.yaml
+```
+
 ## Running on Claude (Anthropic API)
 
 Ollama stays the default. `provider: anthropic` (or `--provider anthropic`) sends every LLM node to
@@ -152,6 +180,68 @@ run cost about $2.30 in API usage and took about 5 minutes of wall-clock time. O
   powers up at 0, which the spec doesn't say. `sim_fix` adds an `initial` block, the
   `MultipleAlwaysAssigns` lint check rejects it, and `fix` deletes it again until the loop gives up.
 - 1 is a real miss (`Prob066_edgecapture`, 4/266 mismatches).
+
+### What the agent adds
+
+Two one-shot baselines (`--mode oneshot`, see "One-shot baseline") against the full agent, on the same model
+and scoring.
+
+**devstral-small-2 (Ollama, 2 problems in parallel)**
+
+| | One-shot, verilog-eval prompt | One-shot, agent prompt (no plan) | Full agent | Full agent + sim |
+|---|---|---|---|---|
+| Run | `2026-10-16_01-23-49` | `2026-10-16_01-47-34` | `2026-10-05_23-15-16` | `2026-10-10_22-27-40` |
+| Pass rate | 53/156 (34.0%) | 70/156 (44.9%) | 84/156 (53.8%) | **105/156 (67.3%)** |
+| Build failures | 39 | 16 | 2 | 1 |
+| Functional failures | 62 | 67 | 66 | 47 |
+| Other (sim timeout, etc.) | 2 | 3 | 4 | 3 |
+| LLM calls | 156 | 156 | 353 | 599 |
+| Total tokens | 107,520 | 149,142 | 497,605 | 1,136,337 |
+| Avg tokens/problem | ~689 | ~956 | ~3,190 | ~7,284 |
+| Avg time/problem | 17.1s | 11.9s | 33.0s | 70.1s |
+
+For devstral, each layer adds problems. AtomRTL nearly doubles the plain verilog-eval baseline (53 to 105):
+
+- **Prompt: +17.** The build failures drop from 39 to 16. With the plain prompt, devstral writes invalid
+  Verilog: output `wire`s assigned in `always` blocks, `genvar` inside `always`, enum types Icarus rejects.
+  The agent's system rules target exactly these.
+- **Plan + check/fix loop: +14.** The remaining build failures almost all go away (16 to 2).
+- **Simulation feedback: +21.** It's the only layer that cuts functional failures (66 to 47).
+
+The one-shot verilog-eval column has only 2 "other": one of the 3 untestable problems failed to compile
+first. Its time per problem includes loading the model onto the GPU (~155s on the first two problems).
+
+**Claude Sonnet 5.5 (Anthropic API, 8 problems in parallel)**
+
+There is no Claude "full agent without simulation" run yet.
+
+| | One-shot, verilog-eval prompt | One-shot, agent prompt (no plan) | Full agent + sim |
+|---|---|---|---|
+| Run | `2026-10-16_01-12-35` | `2026-10-16_01-16-21` | `2026-10-12_23-40-04` |
+| Pass rate | 145/156 (92.9%) | 143/156 (91.7%) | **149/156 (95.5%)** |
+| Build failures | 2 | 0 | 0 |
+| Functional failures | 6 | 10 | 4 |
+| Other (sim timeout, etc.) | 3 | 3 | 3 |
+| LLM calls | 156 | 156 | 346 |
+| Total tokens | 109,000 | 207,827 | 583,597 |
+| Avg tokens/problem | ~699 | ~1,332 | ~3,741 |
+| API cost | ~$0.70 | ~$0.87 | ~$2.34 |
+| Avg time/problem | 7.8s | 7.9s | 13.7s |
+
+Claude gets much less from the scaffolding than devstral (one-shot is already 92-93%):
+
+- The prompt alone makes no measurable difference: 145 vs. 143, within run-to-run variance (see
+  "Variance between runs"). But the two runs fail different problems:
+  - The agent prompt removes the build failures: the verilog-eval prompt's 2 named the module
+    `top_module`/`full_module` instead of `TopModule`.
+  - The agent prompt's strict "use this header exactly" rule backfires on spec typos. `Prob031_dff`'s spec
+    lists `input q`, so the model kept `q` as an input and failed 118/121 samples. With the verilog-eval
+    prompt it made `q` an output and passed.
+- The plan and the check/fix/sim loop add 6 problems over the same prompt (143 to 149) for ~2.8x the
+  tokens. The full agent fails only the 3 untestable problems and 4 others.
+- 2 compiles in the verilog-eval-prompt run (`Prob045_edgedetect2`, `Prob046_dff8p`) were killed by
+  the scoring's 60s timeout during the run, although the designs compile instantly. They were re-scored
+  afterwards with the same code (both pass), and `status.json` notes it.
 
 ### Variance between runs
 
